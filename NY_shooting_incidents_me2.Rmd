@@ -1,0 +1,190 @@
+---
+title: "NY_shooting_incidents"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+mainfont: NanumGothic
+---
+
+
+
+```{r library}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(dlookr)
+library(Hmisc)
+library(caret)
+```
+
+```{r}
+#data loading
+data = read.csv('https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD')
+
+head(data)
+
+```
+```{r}
+summary(data)
+
+```
+```{r}
+diagnose(data)
+
+```
+```{r}
+describe(data)
+```
+```{r}
+#Convert to factor
+
+data$BORO <- as.factor(data$BORO)
+data$PRECINCT <-as.factor(data$PRECINCT)
+data$JURISDICTION_CODE <- as.factor(data$JURISDICTION_CODE)
+data$STATISTICAL_MURDER_FLAG <- as.factor(data$STATISTICAL_MURDER_FLAG)
+data$VIC_AGE_GROUP <- as.factor(data$VIC_AGE_GROUP)
+data$VIC_SEX <- as.factor(data$VIC_SEX)
+data$VIC_RACE <- as.factor(data$VIC_RACE)
+```
+#Jurisdiction codes 0(Patrol), 1(Transit) and 2(Housing) represent 
+#NYPD whilst codes 3 and more represent non NYPD jurisdictions
+
+```{r}
+#Check levels and missing value
+
+levels(data$BORO)
+levels(data$PRECINCT)
+levels(data$JURISDICTION_CODE)
+levels(data$STATISTICAL_MURDER_FLAG)
+levels(data$VIC_AGE_GROUP)
+levels(data$VIC_SEX)
+levels(data$VIC_RACE)
+```
+```{r}
+#Visualize the distribution of each variable
+
+qplot(data$BORO)
+qplot(data$PRECINCT)
+qplot(data$STATISTICAL_MURDER_FLAG)
+qplot(data$VIC_AGE_GROUP)
+qplot(data$VIC_SEX)
+qplot(data$VIC_RACE)
+```
+```{r}
+#Date extraction
+
+Sys.setlocale("LC_TIME","English_United States")
+data$OCCUR_TIME = strptime(data$OCCUR_TIME, format = '%H:%M')
+data = data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(WEEKDAY = weekdays(OCCUR_DATE)) %>%
+  mutate(HOUR = hour(OCCUR_TIME)) %>%
+  mutate(YEAR = year(OCCUR_DATE))
+```
+```{r}
+#Put only the necessary variables in the nypd table.
+
+nypd <- data %>% select(YEAR,WEEKDAY,HOUR,BORO,JURISDICTION_CODE,
+                        PRECINCT,STATISTICAL_MURDER_FLAG,
+                        VIC_AGE_GROUP, VIC_SEX, VIC_RACE)
+
+diagnose(nypd)
+describe(nypd)
+nypd <- na.omit(nypd)
+```
+```{r}
+#Visualization of nypd
+
+nypd %>%
+  select(YEAR, BORO) %>%
+  count(YEAR, BORO) %>%
+  ggplot(aes(x = YEAR, y = n, group = BORO)) + geom_line(aes(color = BORO)) +
+  geom_point(aes(color = BORO))
+
+nypd %>%
+  select(HOUR, BORO) %>%
+  count(HOUR, BORO) %>%
+  ggplot(aes(x = HOUR, y = n, group = BORO)) + geom_line(aes(color = BORO)) +
+  geom_point(aes(color = BORO))
+
+nypd %>%
+  select(WEEKDAY, BORO) %>%
+  count(WEEKDAY, BORO) %>%
+  ggplot(aes(x = WEEKDAY, y = n, group = BORO)) + geom_line(aes(color = BORO)) +
+  geom_point(aes(color = BORO))
+```
+```{r}
+#mosaicplot
+
+mosaicplot(STATISTICAL_MURDER_FLAG~WEEKDAY+HOUR,data=nypd,color=TRUE)
+mosaicplot(STATISTICAL_MURDER_FLAG~VIC_AGE_GROUP+VIC_RACE,data=nypd,color=TRUE)
+```
+```{r}
+#Creating an xgboost Classification Model
+
+library(xgboost)
+library(Matrix)
+library(data.table)
+library(MLmetrics)
+
+levels(nypd$STATISTICAL_MURDER_FLAG) <- c(0,1)
+head(nypd)
+```
+```{r}
+xgb_sparse_matrix <- sparse.model.matrix(STATISTICAL_MURDER_FLAG~. -1, data = nypd)
+
+# define train data set sampling index
+train_index <- sample(1:nrow(xgb_sparse_matrix), 15000)
+
+# Create train ,test data set , label data   
+train_x <- xgb_sparse_matrix[train_index,]
+test_x <- xgb_sparse_matrix[-train_index,]
+train_y <- nypd[train_index,'STATISTICAL_MURDER_FLAG']
+test_y <- nypd[-train_index,'STATISTICAL_MURDER_FLAG']
+
+dtrain <- xgb.DMatrix(data = train_x, label= as.matrix(train_y))
+dtest <- xgb.DMatrix(data = test_x, label= as.matrix(test_y))
+
+```
+```{r}
+param <- list(max_depth = 100,
+              eta = 0.001, 
+              verbose = 0, 
+              objective = "binary:logistic", 
+              eval_metric = "auc")
+
+xgb <- xgb.train(params = param,
+                 data = dtrain, 
+                 nrounds=3000, 
+                 subsample = 0.7,
+                 colsample_bytree = 0.6
+)
+
+train_y_pred <- predict(xgb, dtrain)
+test_y_pred <- predict(xgb, dtest)
+
+KS_Stat(train_y_pred,train_y)
+KS_Stat(test_y_pred,test_y)
+
+```
+```{r}
+# Feature importance
+
+importance_matrix <- xgb.importance(dimnames(dtrain)[[2]], model = xgb)
+importance_matrix
+xgb.plot.importance(importance_matrix[1:10,])
+```
+
+#Conclusion
+
+New York shooting accidents have decreased until 2019, but have been increasing rapidly since 2020.
+The most accidents occur at 10 p.m. to 11 p.m.
+Accidents occur the most on Sundays and then on Saturdays.
+It occurs most frequently in the Brooklyn area.
+
+As a result of checking feature importance in the XGBOOST classification model,
+
+It is time and year that most affect death by gun. This seems to be due to the rapid increase in accidents last year and this year and the main occurrence at night.
+In addition, there seems to be a high probability of death by gun due to the large number of black people.
